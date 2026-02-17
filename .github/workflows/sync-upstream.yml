@@ -53,7 +53,7 @@ jobs:
           git remote add upstream https://github.com/hehonghui/awesome-english-ebooks.git
           git fetch upstream master
 
-          git merge -s recursive -X theirs upstream/master \
+          git merge -s recursive -X theirs --allow-unrelated-histories upstream/master \
             -m "chore: auto-sync upstream $(date -u +%Y-%m-%d)"
 
           CONFLICT_FILES=$(grep -rl '<<<<<<< HEAD' . 2>/dev/null || true)
