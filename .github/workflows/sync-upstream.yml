@@ -27,16 +27,14 @@ jobs:
           echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
           echo "Response: $BODY"
           if [ "$HTTP_CODE" = "200" ]; then
-            MERGE_TYPE=$(echo "$BODY" | jq -r '.merge_type')
-            echo "merge_type=$MERGE_TYPE" >> "$GITHUB_OUTPUT"
-            echo "✅ Synced via API: $MERGE_TYPE"
+            echo "✅ Synced via API"
           elif [ "$HTTP_CODE" = "409" ]; then
             echo "⚠️ Conflicts detected, will use git merge fallback"
           else
-            echo "ℹ️ Already up to date or other status: $HTTP_CODE"
+            echo "ℹ️ Status: $HTTP_CODE"
           fi
 
-      # 只在 API 合并失败（有冲突）时才做完整 git checkout + merge
+      # 只在 API 合并失败（409）时才做完整 git checkout + merge
       - name: Checkout fork (fallback)
         if: steps.api_sync.outputs.http_code == '409'
         uses: actions/checkout@v4
@@ -50,19 +48,31 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # 保存 fork 独有的文件（上游不存在的）
+          cp .github/workflows/sync-upstream.yml /tmp/sync-upstream.yml.bak
+
           git remote add upstream https://github.com/hehonghui/awesome-english-ebooks.git
           git fetch upstream master
 
           git merge -s recursive -X theirs --allow-unrelated-histories upstream/master \
-            -m "chore: auto-sync upstream $(date -u +%Y-%m-%d)"
+            -m "chore: auto-sync upstream $(date -u +%Y-%m-%d)" || true
 
-          CONFLICT_FILES=$(grep -rl '<<<<<<< HEAD' . 2>/dev/null || true)
+          # 恢复 fork 独有的 workflow 文件
+          mkdir -p .github/workflows
+          cp /tmp/sync-upstream.yml.bak .github/workflows/sync-upstream.yml
+
+          # 清理所有残留 conflict markers（排除 workflow 文件自身）
+          CONFLICT_FILES=$(grep -rl '<<<<<<< HEAD' . 2>/dev/null | grep -v '.github/workflows/sync-upstream.yml' || true)
           if [ -n "$CONFLICT_FILES" ]; then
-            echo "Fixing residual conflict markers:"
+            echo "Fixing residual conflict markers in:"
             echo "$CONFLICT_FILES"
-            echo "$CONFLICT_FILES" | xargs git checkout upstream/master --
-            git add -A
-            git commit -m "fix: resolve residual conflict markers"
+            while IFS= read -r f; do
+              git checkout upstream/master -- "$f" 2>/dev/null || true
+            done <<< "$CONFLICT_FILES"
           fi
+
+          git add -A
+          # 如果有变更则 commit（merge 可能已经自动 commit）
+          git diff --cached --quiet || git commit -m "fix: resolve conflicts and restore fork files"
 
           git push origin master
