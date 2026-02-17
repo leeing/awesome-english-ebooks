@@ -12,42 +12,57 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout fork
+      # 不做完整 checkout，用 GitHub API 先尝试无冲突合并
+      - name: Try merge-upstream API
+        id: api_sync
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/merge-upstream \
+            -d '{"branch":"master"}')
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
+          echo "Response: $BODY"
+          if [ "$HTTP_CODE" = "200" ]; then
+            MERGE_TYPE=$(echo "$BODY" | jq -r '.merge_type')
+            echo "merge_type=$MERGE_TYPE" >> "$GITHUB_OUTPUT"
+            echo "✅ Synced via API: $MERGE_TYPE"
+          elif [ "$HTTP_CODE" = "409" ]; then
+            echo "⚠️ Conflicts detected, will use git merge fallback"
+          else
+            echo "ℹ️ Already up to date or other status: $HTTP_CODE"
+          fi
+
+      # 只在 API 合并失败（有冲突）时才做完整 git checkout + merge
+      - name: Checkout fork (fallback)
+        if: steps.api_sync.outputs.http_code == '409'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Add upstream remote
-        run: git remote add upstream https://github.com/hehonghui/awesome-english-ebooks.git
-
-      - name: Fetch upstream
-        run: git fetch upstream master
-
-      - name: Check for new commits
-        id: check
-        run: |
-          COUNT=$(git rev-list --count HEAD..upstream/master)
-          echo "new_commits=$COUNT" >> "$GITHUB_OUTPUT"
-          echo "Upstream has $COUNT new commit(s)"
-
-      - name: Merge upstream
-        if: steps.check.outputs.new_commits != '0'
+      - name: Fetch and merge upstream (fallback)
+        if: steps.api_sync.outputs.http_code == '409'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/hehonghui/awesome-english-ebooks.git
+          git fetch upstream master
+
           git merge -s recursive -X theirs upstream/master \
             -m "chore: auto-sync upstream $(date -u +%Y-%m-%d)"
 
           CONFLICT_FILES=$(grep -rl '<<<<<<< HEAD' . 2>/dev/null || true)
           if [ -n "$CONFLICT_FILES" ]; then
-            echo "Fixing residual conflict markers in:"
+            echo "Fixing residual conflict markers:"
             echo "$CONFLICT_FILES"
             echo "$CONFLICT_FILES" | xargs git checkout upstream/master --
             git add -A
             git commit -m "fix: resolve residual conflict markers"
           fi
 
-      - name: Push
-        if: steps.check.outputs.new_commits != '0'
-        run: git push origin master
+          git push origin master
